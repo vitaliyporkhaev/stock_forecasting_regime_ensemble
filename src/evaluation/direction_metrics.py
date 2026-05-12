@@ -9,9 +9,7 @@ def direction_accuracy(y_true, y_pred):
 
 
 def f1_direction(y_true, y_pred):
-    """
-    Simple directional F1 (up vs down classification)
-    """
+
     y_true = (np.array(y_true) > 0).astype(int)
     y_pred = (np.array(y_pred) > 0).astype(int)
 

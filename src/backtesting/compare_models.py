@@ -2,16 +2,6 @@ import pandas as pd
 
 
 def compare_models(results_dict):
-    """
-    results_dict:
-    {
-        "LightGBM": {...},
-        "LSTM": {...},
-        "Meta": {...},
-        "BuyHold": {...}
-    }
-    """
-
     table = []
 
     for name, res in results_dict.items():

@@ -7,22 +7,18 @@ channels:
 dependencies:
   - python=3.10
 
-  # core scientific stack
   - numpy
   - pandas
   - scikit-learn
   - matplotlib
   - seaborn
 
-  # time series
   - statsmodels
 
-  # utilities
   - pyyaml
   - tqdm
   - joblib
 
-  # pip-only packages
   - pip
   - pip:
       - yfinance>=0.2.40

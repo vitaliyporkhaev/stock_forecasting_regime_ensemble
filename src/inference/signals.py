@@ -5,11 +5,9 @@ import pandas as pd
 def prediction_to_signal(pred: np.ndarray,
                          threshold: float = 0.0):
     """
-    Convert forecasted returns into trading signals
-
-    1 → long
-    -1 → short
-    0 → no position (optional if threshold used)
+    1 - long
+    -1 - short
+    0 - no position (optional if threshold used)
     """
 
     signals = np.where(pred > threshold, 1,
@@ -19,7 +17,4 @@ def prediction_to_signal(pred: np.ndarray,
 
 
 def continuous_position(pred: np.ndarray):
-    """
-    Soft position sizing (better for Sharpe)
-    """
     return np.tanh(pred)

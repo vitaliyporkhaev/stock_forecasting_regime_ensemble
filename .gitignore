@@ -1,6 +1,3 @@
-# =====================
-# Python
-# =====================
 __pycache__/
 *.py[cod]
 *.pyo
@@ -10,30 +7,19 @@ env/
 venv/
 .venv/
 
-# =====================
-# Jupyter / Colab
-# =====================
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 
-# Colab autosave
 *.bak
 
-# =====================
-# Data (VERY IMPORTANT)
-# =====================
 data/
 *.csv
 *.parquet
 *.pkl
 *.joblib
 
-# raw financial data
 *.h5
 
-# =====================
-# Models
-# =====================
 models/
 *.h5
 *.keras
@@ -41,37 +27,19 @@ models/
 *.pth
 *.ckpt
 
-# =====================
-# Logs
-# =====================
 logs/
 *.log
 
-# =====================
-# OS
-# =====================
 .DS_Store
 Thumbs.db
 
-# =====================
-# IDE
-# =====================
 .vscode/
 .idea/
 
-# =====================
-# TensorFlow / cache
-# =====================
 .cache/
 *.tfevents*
 
-# =====================
-# pytest
-# =====================
 .pytest_cache/
 
-# =====================
-# Conda
-# =====================
 .env
 .env.*

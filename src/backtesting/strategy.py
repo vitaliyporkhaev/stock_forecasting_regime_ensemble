@@ -2,9 +2,6 @@ import numpy as np
 
 
 def strategy_returns(predictions, real_returns, mode="sign"):
-    """
-    predictions → trading positions → PnL
-    """
 
     if mode == "sign":
         positions = np.sign(predictions)

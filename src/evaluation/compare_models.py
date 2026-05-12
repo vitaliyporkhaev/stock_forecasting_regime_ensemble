@@ -2,16 +2,6 @@ import pandas as pd
 
 
 def build_comparison_table(results: dict):
-    """
-    results = {
-        "Naive": {...},
-        "ARIMA": {...},
-        "LightGBM": {...},
-        "LSTM": {...},
-        "Meta": {...},
-        "BuyHold": {...}
-    }
-    """
 
     rows = []
 
