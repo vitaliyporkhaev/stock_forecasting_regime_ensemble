@@ -14,11 +14,23 @@ from src.models.lstm_model import LSTMModel
 from src.models.arima_model import ARIMAModel
 from src.models.stacking_model import StackingModel
 
-from src.inference.signals import prediction_to_signal
 from src.backtesting.backtest_engine import BacktestEngine
 from src.backtesting.buy_hold import buy_and_hold_returns
 
 from src.evaluation.compare_models import build_comparison_table
+
+
+
+def clean_ml_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    df = df.select_dtypes(include=[np.number])
+
+    df = df.replace([np.inf, -np.inf], np.nan)
+
+    df = df.dropna().reset_index(drop=True)
+
+    return df
 
 
 def run_pipeline():
@@ -36,12 +48,12 @@ def run_pipeline():
     features = build_features(df)
 
     if "rsi" not in features.columns:
-        raise ValueError(
-            "Feature 'rsi' is missing. Fix feature_pipeline.py (RSI must be created before regimes)."
-        )
+        raise ValueError("Feature 'rsi' is missing. Fix feature_pipeline.py")
 
     features = add_cluster_regimes(features)
     features = build_regime_features(features)
+
+    features = clean_ml_features(features)
 
     X = features.drop(columns=["log_return"])
     y = features["log_return"]
@@ -50,7 +62,6 @@ def run_pipeline():
 
     X_train, X_test = X.iloc[:split], X.iloc[split:]
     y_train, y_test = y.iloc[:split], y.iloc[split:]
-
 
     lgb_model = LightGBMModel()
     lgb_model.fit(X_train, y_train)
@@ -65,9 +76,7 @@ def run_pipeline():
 
     arima_model = ARIMAModel()
     arima_model.fit(y_train)
-    arima_pred = arima_model.predict(len(y_test))
-
-    arima_pred = np.array(arima_pred).reshape(-1)
+    arima_pred = np.array(arima_model.predict(len(y_test))).reshape(-1)
 
     min_len = min(len(lgb_pred), len(lstm_pred), len(arima_pred), len(y_test))
 
@@ -84,7 +93,6 @@ def run_pipeline():
     final_pred = stacker.predict(meta_X)
 
     engine = BacktestEngine()
-
     results_meta = engine.run(final_pred, y_test)
 
     bh = buy_and_hold_returns(df["close"].iloc[split:split + min_len])
