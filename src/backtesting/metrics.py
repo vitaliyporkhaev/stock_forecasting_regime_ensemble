@@ -2,9 +2,12 @@ import numpy as np
 
 
 def sharpe_ratio(returns, rf=0.0):
-    returns = np.array(returns)
-    excess = returns - rf
-    return np.mean(excess) / (np.std(excess) + 1e-9)
+    returns = np.nan_to_num(returns)
+
+    if np.std(returns) == 0:
+        return 0.0
+
+    return (np.mean(returns) - rf) / np.std(returns) * np.sqrt(252)
 
 
 def max_drawdown(equity_curve):
@@ -15,7 +18,9 @@ def max_drawdown(equity_curve):
 
 
 def cumulative_return(returns):
-    return np.prod(1 + np.array(returns)) - 1
+    returns = np.nan_to_num(returns)
+
+    return np.prod(1 + returns) - 1
 
 
 def sortino_ratio(returns, rf=0.0):

@@ -1,15 +1,16 @@
 import pandas as pd
 
+def build_comparison_table(results):
 
-def compare_models(results_dict):
-    table = []
+    rows = []
 
-    for name, res in results_dict.items():
-        table.append({
+    for name, metrics in results.items():
+
+        rows.append({
             "Model": name,
-            "Sharpe": res["sharpe"],
-            "MaxDD": res["max_drawdown"],
-            "Return": res["cumulative_return"]
+            "Sharpe": metrics.get("sharpe"),
+            "Max DD": metrics.get("max_drawdown"),
+            "Return": metrics.get("cumulative_return")
         })
 
-    return pd.DataFrame(table)
+    return pd.DataFrame(rows)

@@ -1,16 +1,15 @@
 import numpy as np
 
+def strategy_returns(predictions, real_returns):
 
-def strategy_returns(predictions, real_returns, mode="sign"):
+    predictions = np.asarray(predictions)
+    real_returns = np.asarray(real_returns)
 
-    if mode == "sign":
-        positions = np.sign(predictions)
+    predictions = np.nan_to_num(predictions)
+    real_returns = np.nan_to_num(real_returns)
 
-    elif mode == "tanh":
-        positions = np.tanh(predictions)
+    positions = np.sign(predictions)
 
-    else:
-        positions = predictions
+    strat_returns = positions * real_returns
 
-    returns = positions * real_returns
-    return returns, positions
+    return strat_returns, positions
