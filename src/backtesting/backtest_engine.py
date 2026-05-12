@@ -15,6 +15,11 @@ class BacktestEngine:
         self.rf = rf
 
     def run(self, predictions, real_returns):
+        print(f"DEBUG: predictions shape: {predictions.shape}")
+        print(f"DEBUG: real_returns shape: {real_returns.shape}")
+        print(f"DEBUG: predictions mean: {np.mean(predictions):.4f}")
+        print(f"DEBUG: real_returns mean: {np.mean(real_returns):.4f}")
+
         strat_ret, positions = strategy_returns(predictions, real_returns)
 
         equity = equity_curve(strat_ret)
