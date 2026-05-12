@@ -4,6 +4,8 @@ import pandas as pd
 
 from configs.config_loader import load_config
 
+from src.inference.signals import prediction_to_signal
+
 from src.data.download_yfinance import download_ticker
 from src.features.feature_pipeline import build_features
 from src.regimes.clustering_regime import add_cluster_regimes
@@ -87,13 +89,20 @@ def run_pipeline():
 
     meta_X = np.column_stack([lgb_pred, lstm_pred, arima_pred])
 
-    stacker = StackingModel()
-    stacker.fit(meta_X, y_test)
+    split_meta = int(len(meta_X) * 0.8)
 
-    final_pred = stacker.predict(meta_X)
+    meta_X_train, meta_X_test = meta_X[:split_meta], meta_X[split_meta:]
+    y_train_meta, y_test_meta = y_test[:split_meta], y_test[split_meta:]
+
+    stacker = StackingModel()
+    stacker.fit(meta_X_train, y_train_meta)
+
+    final_pred = stacker.predict(meta_X_test)
 
     engine = BacktestEngine()
-    results_meta = engine.run(final_pred, y_test)
+    signals = prediction_to_signal(final_pred)
+
+    results_meta = engine.run(signals, y_test_meta)
 
     bh = buy_and_hold_returns(df["close"].iloc[split:split + min_len])
 
