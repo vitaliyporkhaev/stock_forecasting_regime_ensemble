@@ -134,11 +134,18 @@ def run_pipeline():
         bh_sharpe = np.nan
 
     results = {
-        "MetaModel": results_meta,
+        "MetaModel": {
+            **results_meta,
+            "return": results_meta.get("cumulative_return"),
+            "rmse": model_rmse,
+            "mae": model_mae,
+            "direction_acc": model_dir_acc
+        },
         "BuyHold": {
             "sharpe": bh_sharpe,
             "max_drawdown": bh_max_dd,
             "cumulative_return": bh_total_return,
+            "return": bh_total_return,
             "rmse": None,
             "mae": None,
             "direction_acc": None
