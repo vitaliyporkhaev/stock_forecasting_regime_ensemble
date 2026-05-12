@@ -207,21 +207,56 @@ def add_market_regime_features(df):
     """Добавляем признаки рыночного режима для фильтрации сделок"""
     df = df.copy()
 
+    # Создаем колонку волатильности, если её нет
+    if 'volatility' not in df.columns:
+        # Используем log_return если есть, иначе считаем из close
+        if 'log_return' in df.columns:
+            df['volatility'] = df['log_return'].rolling(20).std()
+        else:
+            # Считаем log_return из close
+            df['log_return_temp'] = np.log(df['close'] / df['close'].shift(1))
+            df['volatility'] = df['log_return_temp'].rolling(20).std()
+            df.drop('log_return_temp', axis=1, inplace=True)
+
+    # Заполняем NaN в volatility средним значением
+    df['volatility'] = df['volatility'].fillna(df['volatility'].mean())
+
     # Волатильность как индикатор режима
-    df['volatility_regime'] = pd.qcut(
-        df['volatility'].rank(method='first'),
-        q=3,
-        labels=['low', 'medium', 'high']
-    )
+    try:
+        df['volatility_regime'] = pd.qcut(
+            df['volatility'].rank(method='first'),
+            q=3,
+            labels=['low', 'medium', 'high']
+        )
+    except ValueError:
+        # Если не получается qcut (например, все значения одинаковые)
+        median_vol = df['volatility'].median()
+        df['volatility_regime'] = np.where(
+            df['volatility'] <= median_vol, 'low',
+            np.where(df['volatility'] <= df['volatility'].quantile(0.75), 'medium', 'high')
+        )
 
     # Трендовый режим
-    df['sma_50'] = df['close'].rolling(50).mean()
-    df['sma_200'] = df['close'].rolling(200).mean()
-    df['trend_regime'] = (df['sma_50'] > df['sma_200']).astype(int)
+    if 'close' in df.columns:
+        df['sma_50'] = df['close'].rolling(50).mean()
+        df['sma_200'] = df['close'].rolling(200).mean()
+        # Заполняем NaN
+        df['sma_50'] = df['sma_50'].fillna(df['close'])
+        df['sma_200'] = df['sma_200'].fillna(df['close'])
+        df['trend_regime'] = (df['sma_50'] > df['sma_200']).astype(int)
+    else:
+        df['trend_regime'] = 0
 
     # Моментум
-    df['momentum_20'] = df['close'] / df['close'].shift(20) - 1
-    df['momentum_60'] = df['close'] / df['close'].shift(60) - 1
+    if 'close' in df.columns:
+        df['momentum_20'] = df['close'] / df['close'].shift(20) - 1
+        df['momentum_60'] = df['close'] / df['close'].shift(60) - 1
+        # Заполняем NaN
+        df['momentum_20'] = df['momentum_20'].fillna(0)
+        df['momentum_60'] = df['momentum_60'].fillna(0)
+
+    # Удаляем промежуточные колонки, которые не нужны для обучения
+    # (оставляем только числовые признаки)
 
     return df
 
@@ -251,21 +286,47 @@ def add_alternative_data_features(df):
     df = df.copy()
 
     # Ценовые паттерны
-    df['high_low_ratio'] = df['high'] / df['low']
-    df['close_open_ratio'] = df['close'] / df['open']
+    if 'high' in df.columns and 'low' in df.columns:
+        df['high_low_ratio'] = df['high'] / df['low']
+    else:
+        # Если high/low нет, используем close
+        df['high_low_ratio'] = 1.0
+
+    if 'close' in df.columns and 'open' in df.columns:
+        df['close_open_ratio'] = df['close'] / df['open']
+    else:
+        df['close_open_ratio'] = 1.0
 
     # Объемные индикаторы
     if 'volume' in df.columns:
         df['volume_ma_20'] = df['volume'].rolling(20).mean()
-        df['volume_ratio'] = df['volume'] / df['volume_ma_20']
+        df['volume_ma_20'] = df['volume_ma_20'].fillna(df['volume'])
+        df['volume_ratio'] = df['volume'] / (df['volume_ma_20'] + 1e-9)
         df['volume_trend'] = df['volume'].pct_change(5)
+        df['volume_trend'] = df['volume_trend'].fillna(0)
+    else:
+        # Если volume нет, создаем константные признаки
+        df['volume_ratio'] = 1.0
+        df['volume_trend'] = 0.0
 
     # Волатильность разных периодов
+    if 'log_return' in df.columns:
+        returns = df['log_return']
+    else:
+        returns = np.log(df['close'] / df['close'].shift(1))
+
     for period in [5, 10, 20, 60]:
-        df[f'volatility_{period}'] = df['log_return'].rolling(period).std()
+        col_name = f'volatility_{period}'
+        df[col_name] = returns.rolling(period).std()
+        df[col_name] = df[col_name].fillna(df[col_name].mean() if not df[col_name].isna().all() else 0)
 
     # Отношение волатильностей
-    df['vol_ratio_5_20'] = df['volatility_5'] / (df['volatility_20'] + 1e-9)
+    if 'volatility_5' in df.columns and 'volatility_20' in df.columns:
+        df['vol_ratio_5_20'] = df['volatility_5'] / (df['volatility_20'] + 1e-9)
+        df['vol_ratio_5_20'] = df['vol_ratio_5_20'].fillna(1.0)
+
+    # Удаляем бесконечности
+    df = df.replace([np.inf, -np.inf], np.nan)
 
     return df
 
