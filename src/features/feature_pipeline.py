@@ -19,7 +19,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     for lag in [1, 2, 3, 5, 10]:
         df[f"return_lag_{lag}"] = df["log_return"].shift(lag)
 
-    df["rsi_14"] = rsi(df["close"])
+    df["rsi"] = rsi(df["close"])
 
     df["ema_12"] = ema(df["close"], 12)
     df["ema_26"] = ema(df["close"], 26)
