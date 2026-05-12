@@ -16,6 +16,8 @@ from src.models.stacking_model import StackingModel
 
 from src.backtesting.backtest_engine import BacktestEngine
 from src.evaluation.compare_models import build_comparison_table
+from src.evaluation.regression_metrics import rmse, mae
+from src.evaluation.direction_metrics import direction_accuracy
 
 
 def clean_ml_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -57,12 +59,11 @@ def run_pipeline():
     X_train, X_test = X.iloc[:split], X.iloc[split:]
     y_train, y_test = y.iloc[:split], y.iloc[split:]
 
-    print("Training LightGBM...")
+    print("Training models...")
     lgb_model = LightGBMModel()
     lgb_model.fit(X_train, y_train)
     lgb_pred = lgb_model.predict(X_test)
 
-    print("Training LSTM...")
     X_train_lstm = X_train.values.reshape(len(X_train), X_train.shape[1], 1)
     X_test_lstm = X_test.values.reshape(len(X_test), X_test.shape[1], 1)
 
@@ -70,7 +71,6 @@ def run_pipeline():
     lstm_model.fit(X_train_lstm, y_train.values)
     lstm_pred = lstm_model.predict(X_test_lstm)
 
-    print("Training ARIMA...")
     arima_model = ARIMAModel()
     arima_model.fit(y_train)
     arima_pred = np.array(arima_model.predict(len(y_test))).reshape(-1)
@@ -95,34 +95,26 @@ def run_pipeline():
 
     final_pred = stacker.predict(meta_X_test)
 
-    print("\n" + "="*50)
-    print("DIAGNOSTICS")
-    print("="*50)
-    print(f"Predictions mean: {np.mean(final_pred):.6f}")
-    print(f"Predictions std: {np.std(final_pred):.6f}")
-    print(f"Real returns mean: {np.mean(y_test_meta):.6f}")
-    print(f"Real returns std: {np.std(y_test_meta):.6f}")
+    model_rmse = rmse(y_test_meta, final_pred)
+    model_mae = mae(y_test_meta, final_pred)
+    model_dir_acc = direction_accuracy(y_test_meta, final_pred)
 
-    correlation = np.corrcoef(final_pred, y_test_meta)[0, 1]
-    print(f"Correlation(pred, actual): {correlation:.4f}")
-
-    direction_match = np.mean(np.sign(final_pred) == np.sign(y_test_meta))
-    print(f"Direction accuracy: {direction_match:.4f}")
+    print(f"\nPrediction Quality Metrics:")
+    print(f"RMSE: {model_rmse:.6f}")
+    print(f"MAE: {model_mae:.6f}")
+    print(f"Direction Accuracy: {model_dir_acc:.4f}")
 
     print("\nRunning backtest...")
     engine = BacktestEngine()
 
     results_meta = engine.run(final_pred, y_test_meta)
 
-    print(f"\nStrategy returns stats:")
-    print(f"Mean: {np.mean(results_meta['returns']):.6f}")
-    print(f"Std: {np.std(results_meta['returns']):.6f}")
-    print(f"Min: {np.min(results_meta['returns']):.6f}")
-    print(f"Max: {np.max(results_meta['returns']):.6f}")
-    print(f"Number of trades: {np.sum(np.diff(results_meta['positions']) != 0)}")
+    results_meta["rmse"] = model_rmse
+    results_meta["mae"] = model_mae
+    results_meta["direction_acc"] = model_dir_acc
 
     price_start_idx = split + split_meta
-    price_end_idx = price_start_idx + len(y_test_meta) + 1  # +1 потому что нужны цены для расчета всех доходностей
+    price_end_idx = price_start_idx + len(y_test_meta) + 1
 
     bh_prices = df["close"].iloc[price_start_idx:price_end_idx].values
 
@@ -146,38 +138,19 @@ def run_pipeline():
         "BuyHold": {
             "sharpe": bh_sharpe,
             "max_drawdown": bh_max_dd,
-            "cumulative_return": bh_total_return
+            "cumulative_return": bh_total_return,
+            "rmse": None,
+            "mae": None,
+            "direction_acc": None
         }
     }
 
     table = build_comparison_table(results)
 
     print("\n" + "="*50)
-    print("BACKTEST RESULTS")
+    print("FINAL RESULTS")
     print("="*50)
-    print(table)
-
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
-
-    axes[0].plot(final_pred[:100], label='Predictions', alpha=0.7)
-    axes[0].plot(y_test_meta[:100], label='Actual returns', alpha=0.7)
-    axes[0].set_title('Predictions vs Actual (first 100 points)')
-    axes[0].legend()
-    axes[0].grid(True)
-
-    axes[1].plot(results_meta['equity_curve'], label='Strategy Equity')
-    axes[1].plot(bh_equity[:len(results_meta['equity_curve'])], label='Buy&Hold Equity', alpha=0.7)
-    axes[1].set_title('Equity Curves')
-    axes[1].legend()
-    axes[1].grid(True)
-
-    axes[2].plot(results_meta['returns'][:100], label='Strategy Returns', alpha=0.7)
-    axes[2].set_title('Strategy Returns (first 100 points)')
-    axes[2].legend()
-    axes[2].grid(True)
-
-    plt.tight_layout()
-    plt.show()
+    print(table.to_string())
 
     return table
 
