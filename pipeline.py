@@ -451,53 +451,111 @@ def run_pipeline():
     print(table.to_string())
 
     print("\nСоздание графиков")
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig, axes = plt.subplots(2, 1, figsize=(15, 10))
 
-    ax1 = axes[0, 0]
-    ax1.plot(equity_curve, label='Strategy', linewidth=1.5)
-    ax1.plot(bh_equity, label='Buy & Hold', alpha=0.7, linewidth=1.5)
-    ax1.set_title('Equity Curves Comparison')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+    ax1 = axes[0]
+
+    ax1.plot(equity_curve, label='Strategy Equity', linewidth=2, color='green')
+    ax1.plot(bh_equity, label='Buy & Hold Equity', alpha=0.8, linewidth=2, color='blue')
+    ax1.set_title('Equity Curves and Asset Price', fontsize=14, fontweight='bold')
     ax1.set_xlabel('Time')
-    ax1.set_ylabel('Equity')
+    ax1.set_ylabel('Normalized Equity')
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(y=1.0, color='black', linestyle='-', alpha=0.2, linewidth=0.5)
 
-    ax2 = axes[0, 1]
-    ax2.hist(strategy_returns, bins=50, alpha=0.7, label='Strategy')
-    ax2.hist(bh_returns, bins=50, alpha=0.5, label='Buy&Hold')
-    ax2.axvline(x=0, color='red', linestyle='--', alpha=0.5)
-    ax2.set_title('Returns Distribution')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+    ax1_twin = ax1.twinx()
+    ax1_twin.plot(bh_prices, label=f'{ticker} Price ($)', alpha=0.6, linewidth=1.5,
+                  color='gray', linestyle='--')
+    ax1_twin.set_ylabel(f'{ticker} Price ($)', color='gray')
+    ax1_twin.tick_params(axis='y', labelcolor='gray')
 
-    ax3 = axes[1, 0]
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1_twin.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+
+    ax2 = axes[1]
     running_max = np.maximum.accumulate(equity_curve)
     drawdown = (equity_curve - running_max) / (running_max + 1e-9)
-    ax3.fill_between(range(len(drawdown)), drawdown, 0, alpha=0.3, color='red')
-    ax3.set_title('Strategy Drawdown')
-    ax3.grid(True, alpha=0.3)
-    ax3.set_xlabel('Time')
-    ax3.set_ylabel('Drawdown')
 
-    ax4 = axes[1, 1]
-    sample_size = min(200, len(final_pred))
-    ax4.plot(final_pred[:sample_size], label='Predictions', alpha=0.7)
-    ax4.plot(y_test_meta[:sample_size], label='Actual', alpha=0.7)
-    ax4.set_title(f'Predictions vs Actual (first {sample_size} points)')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
+    bh_running_max = np.maximum.accumulate(bh_equity)
+    bh_drawdown = (bh_equity - bh_running_max) / (bh_running_max + 1e-9)
+
+    ax2.fill_between(range(len(drawdown)), drawdown, 0, alpha=0.3, color='red', label='Strategy DD')
+    ax2.plot(bh_drawdown, alpha=0.5, color='orange', linewidth=1.5, label='Buy&Hold DD')
+    ax2.set_title('Drawdown Comparison', fontsize=14, fontweight='bold')
+    ax2.legend(loc='lower left')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlabel('Time')
+    ax2.set_ylabel('Drawdown')
+    ax2.set_ylim([min(np.min(drawdown), np.min(bh_drawdown)) * 1.1, 0.05])
+
+    info_text = (
+        f'Strategy Return: {results_meta["cumulative_return"]*100:.2f}% | '
+        f'Buy&Hold Return: {bh_total_return*100:.2f}% | '
+        f'Alpha: {(results_meta["cumulative_return"] - bh_total_return)*100:.2f}% | '
+        f'Sharpe: {results_meta["sharpe"]:.2f}'
+    )
+
+    plt.figtext(0.02, 0.02, info_text,
+                fontsize=10, fontweight='bold',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
     plt.savefig('strategy_analysis.png', dpi=150, bbox_inches='tight')
     print("Графики сохранены в strategy_analysis.png")
     plt.close()
 
-    # Дополнительная аналитика
-    print("\nДоп. аналитика:")
-    print(f"Модель переиграла рынок на: {(results_meta['cumulative_return'] - bh_total_return)*100:.2f}%")
-    print(f"Количество сделок: {np.sum(np.diff(signals) != 0)}")
-    print(f"Процент времени в рынке: {np.mean(np.abs(signals) > 0)*100:.1f}%")
-    print(f"Средняя доходность на сделку: {np.mean(strategy_returns[signals != 0])*100:.3f}%")
+    print("\nДЕТАЛЬНАЯ АНАЛИТИКА СТРАТЕГИИ:")
+
+    print("\nАнализ предсказаний модели:")
+    print(f"  Среднее предсказание: {np.mean(final_pred):.6f}")
+    print(f"  Медиана предсказаний: {np.median(final_pred):.6f}")
+    print(f"  Std предсказаний: {np.std(final_pred):.6f}")
+    print(f"  Мин/Макс: {np.min(final_pred):.6f} / {np.max(final_pred):.6f}")
+    print(f"  % положительных предсказаний: {np.mean(final_pred > 0)*100:.1f}%")
+    print(f"  % отрицательных предсказаний: {np.mean(final_pred < 0)*100:.1f}%")
+
+    position_changes = np.diff(signals) != 0
+    num_trades = np.sum(position_changes) // 2
+    time_in_market = np.mean(np.abs(signals) > 0) * 100
+
+    print("\nСтатистика торговли:")
+    print(f"  Количество разворотов позиции: {np.sum(position_changes)}")
+    print(f"  Количество полных сделок: {num_trades}")
+    print(f"  Процент времени в рынке: {time_in_market:.1f}%")
+
+    long_pct = np.mean(signals > 0) * 100
+    short_pct = np.mean(signals < 0) * 100
+    flat_pct = np.mean(signals == 0) * 100
+    print(f"  Время в long: {long_pct:.1f}%")
+    print(f"  Время в short: {short_pct:.1f}%")
+    print(f"  Время вне рынка: {flat_pct:.1f}%")
+
+    print("\n💰 Доходность:")
+    print(f"  Средняя дневная доходность: {np.mean(strategy_returns)*100:.3f}%")
+    print(f"  Std дневной доходности: {np.std(strategy_returns)*100:.3f}%")
+
+    long_returns = strategy_returns[signals > 0]
+    short_returns = strategy_returns[signals < 0]
+
+    if len(long_returns) > 0:
+        print(f"  Long позиции - средняя: {np.mean(long_returns)*100:.3f}%, "
+              f"win rate: {np.mean(long_returns > 0)*100:.1f}%")
+    if len(short_returns) > 0:
+        print(f"  Short позиции - средняя: {np.mean(short_returns)*100:.3f}%, "
+              f"win rate: {np.mean(short_returns > 0)*100:.1f}%")
+
+    print(f"\nИтоговые результаты:")
+    print(f"  Стратегия: {results_meta['cumulative_return']*100:.2f}%")
+    print(f"  Buy & Hold: {bh_total_return*100:.2f}%")
+    print(f"  Альфа (превышение): {(results_meta['cumulative_return'] - bh_total_return)*100:.2f}%")
+
+    if long_pct > 95:
+        print("\n⚠️  ВНИМАНИЕ: Стратегия почти всегда в long!")
+        print("   Рекомендация: увеличьте threshold в filter_trades_by_confidence")
+    elif short_pct > 95:
+        print("\n⚠️  ВНИМАНИЕ: Стратегия почти всегда в short!")
+        print("   Рекомендация: увеличьте threshold в filter_trades_by_confidence")
 
     return table
 
