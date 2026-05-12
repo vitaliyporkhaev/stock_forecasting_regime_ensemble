@@ -1,0 +1,14 @@
+training:
+  train_ratio: 0.8
+  n_splits: 5
+  walk_forward: true
+
+features:
+  feature_window: 20
+  include_regimes: true
+
+regimes:
+  method: "hmm"   # or "kmeans"
+  n_states: 3
+
+seed: 42

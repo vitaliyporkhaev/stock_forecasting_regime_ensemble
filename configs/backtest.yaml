@@ -1,0 +1,17 @@
+backtest:
+  initial_capital: 10000
+  transaction_cost: 0.0005
+
+strategy:
+  mode: "tanh"   # "sign" or "tanh"
+
+metrics:
+  include:
+    - sharpe
+    - sortino
+    - max_drawdown
+    - calmar
+    - total_return
+
+benchmark:
+  buy_and_hold: true

@@ -1,0 +1,30 @@
+name: stock-forecasting
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+
+  # core scientific stack
+  - numpy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - seaborn
+
+  # time series
+  - statsmodels
+
+  # utilities
+  - pyyaml
+  - tqdm
+  - joblib
+
+  # pip-only packages
+  - pip
+  - pip:
+      - yfinance>=0.2.40
+      - lightgbm>=4.0.0
+      - tensorflow>=2.13
