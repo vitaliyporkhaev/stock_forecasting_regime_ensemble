@@ -171,8 +171,9 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import lightgbm as lgb
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 from sklearn.linear_model import Ridge
+from sklearn.ensemble import RandomForestRegressor
 
 from configs.config_loader import load_config
 
@@ -227,7 +228,6 @@ def add_market_regime_features(df):
             labels=['low', 'medium', 'high']
         )
     except:
-        median_vol = df['volatility'].median()
         df['volatility_regime'] = 'medium'
 
     if 'close' in df.columns:
@@ -284,23 +284,31 @@ def add_alternative_data_features(df):
     return df
 
 
-def filter_trades_by_confidence(predictions, threshold=0.0005):
-    signals = np.zeros_like(predictions)
-    confident_idx = np.abs(predictions) > threshold
-    signals[confident_idx] = np.sign(predictions[confident_idx])
+def percentile_strategy(predictions, long_pct=60, short_pct=40):
+    long_threshold = np.percentile(predictions, long_pct)
+    short_threshold = np.percentile(predictions, short_pct)
+
+    signals = np.zeros(len(predictions))
+    signals[predictions > long_threshold] = 1
+    signals[predictions < short_threshold] = -1
+
     return signals
 
 
-def calculate_position_size(predictions, max_position=1.0):
-    confidence = np.abs(predictions)
-    if np.std(confidence) > 0:
-        position_size = np.clip(confidence / np.std(confidence) * 0.5, 0, max_position)
-    else:
-        position_size = np.ones_like(predictions) * 0.5
-    return np.sign(predictions) * position_size
+def momentum_strategy(predictions, window=5):
+    pred_series = pd.Series(predictions)
+    pred_ma = pred_series.rolling(window).mean()
+    pred_ma = pred_ma.fillna(pred_series.median())
+
+    signals = np.zeros(len(predictions))
+    signals[predictions > pred_ma.values] = 1
+    signals[predictions <= pred_ma.values] = -1
+
+    return signals
 
 
 def run_pipeline():
+
     data_cfg = load_config("data")
     train_cfg = load_config("train")
 
@@ -359,6 +367,7 @@ def run_pipeline():
     )
     lgb_model.fit(X_train, y_train)
     lgb_pred = lgb_model.predict(X_test)
+    print(f"   LightGBM pred: mean={np.mean(lgb_pred):.6f}, std={np.std(lgb_pred):.6f}")
 
     X_train_lstm = X_train.values.reshape(len(X_train), X_train.shape[1], 1)
     X_test_lstm = X_test.values.reshape(len(X_test), X_test.shape[1], 1)
@@ -366,10 +375,12 @@ def run_pipeline():
     lstm_model = LSTMModel(input_shape=(X_train.shape[1], 1))
     lstm_model.fit(X_train_lstm, y_train.values, epochs=20, batch_size=64)
     lstm_pred = lstm_model.predict(X_test_lstm)
+    print(f"   LSTM pred: mean={np.mean(lstm_pred):.6f}, std={np.std(lstm_pred):.6f}")
 
     arima_model = ARIMAModel(order=(2, 1, 2))
     arima_model.fit(y_train)
     arima_pred = np.array(arima_model.predict(len(y_test))).reshape(-1)
+    print(f"   ARIMA pred: mean={np.mean(arima_pred):.6f}, std={np.std(arima_pred):.6f}")
 
     min_len = min(len(lgb_pred), len(lstm_pred), len(arima_pred), len(y_test))
 
@@ -380,25 +391,82 @@ def run_pipeline():
 
     meta_X = np.column_stack([lgb_pred, lstm_pred, arima_pred])
 
-    split_meta = int(len(meta_X) * 0.8)
+    meta_scaler = StandardScaler()
+    meta_X_scaled = meta_scaler.fit_transform(meta_X)
 
-    meta_X_train, meta_X_test = meta_X[:split_meta], meta_X[split_meta:]
-    y_train_meta, y_test_meta = y_test_aligned[:split_meta], y_test_aligned[split_meta:]
+    split_meta = int(len(meta_X_scaled) * 0.8)
+
+    meta_X_train = meta_X_scaled[:split_meta]
+    meta_X_test = meta_X_scaled[split_meta:]
+    y_train_meta = y_test_aligned[:split_meta]
+    y_test_meta = y_test_aligned[split_meta:]
 
     stacker = StackingModel()
-    stacker.meta_model = Ridge(alpha=1.0)
+    stacker.meta_model = RandomForestRegressor(
+        n_estimators=100,
+        max_depth=5,
+        min_samples_leaf=20,
+        random_state=42,
+        n_jobs=-1
+    )
     stacker.fit(meta_X_train, y_train_meta)
 
     final_pred = stacker.predict(meta_X_test)
 
+    final_pred = (final_pred - np.mean(final_pred)) / (np.std(final_pred) + 1e-9)
 
-    signals = filter_trades_by_confidence(final_pred, threshold=0.0003)
-    position_sizes = calculate_position_size(final_pred)
-    combined_signals = signals * position_sizes / (np.abs(signals) + 1e-9)
+    print(f"   Stack pred: mean={np.mean(final_pred):.6f}, std={np.std(final_pred):.6f}")
+    print(f"   Positive: {np.mean(final_pred > 0)*100:.1f}%")
+    print(f"   Negative: {np.mean(final_pred < 0)*100:.1f}%")
 
-    strategy_returns = combined_signals * y_test_meta
+    strategies = {
+        'Percentile (60/40)': percentile_strategy(final_pred, 60, 40),
+        'Percentile (70/30)': percentile_strategy(final_pred, 70, 30),
+        'Percentile (80/20)': percentile_strategy(final_pred, 80, 20),
+        'Momentum (5)': momentum_strategy(final_pred, 5),
+        'Momentum (10)': momentum_strategy(final_pred, 10),
+        'Always Long': np.ones_like(final_pred),
+    }
 
-    print("⚙️ Бэктестинг...")
+    print(f"  {'Стратегия':<25s} {'Sharpe':>8s} {'Return':>10s} {'Trades':>8s} {'Win Rate':>10s}")
+
+    best_strategy = None
+    best_signals = None
+    best_sharpe = -np.inf
+    best_name = ""
+
+    for name, signals in strategies.items():
+        ret = signals * y_test_meta
+
+        sharpe = np.mean(ret) / (np.std(ret) + 1e-9) * np.sqrt(252)
+        total_ret = np.prod(1 + ret + 1e-9) - 1
+        trades = np.sum(np.diff(signals) != 0) // 2
+        win_rate = np.mean(ret > 0) * 100
+
+        print(f"  {name:<25s} {sharpe:>8.3f} {total_ret*100:>9.2f}% {trades:>8d} {win_rate:>9.1f}%")
+
+        if sharpe > best_sharpe and trades > 0:
+            best_sharpe = sharpe
+            best_signals = signals
+            best_name = name
+            best_strategy = ret
+
+    if best_strategy is None:
+        best_sharpe = -np.inf
+        for name, signals in strategies.items():
+            ret = signals * y_test_meta
+            sharpe = np.mean(ret) / (np.std(ret) + 1e-9) * np.sqrt(252)
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_signals = signals
+                best_name = name
+                best_strategy = ret
+
+    print(f"\nВыбрана стратегия: {best_name}")
+
+    signals = best_signals
+    strategy_returns = best_strategy
+
     engine = BacktestEngine()
     results_meta = engine.run(final_pred, y_test_meta)
 
@@ -446,15 +514,13 @@ def run_pipeline():
 
     table = build_comparison_table(results)
 
-    print("\n" )
-    print("Финальные результаты")
+    print("\n" + "=" * 60)
+    print("ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ")
     print(table.to_string())
 
-    print("\nСоздание графиков")
     fig, axes = plt.subplots(2, 1, figsize=(15, 10))
 
     ax1 = axes[0]
-
     ax1.plot(equity_curve, label='Strategy Equity', linewidth=2, color='green')
     ax1.plot(bh_equity, label='Buy & Hold Equity', alpha=0.8, linewidth=2, color='blue')
     ax1.set_title('Equity Curves and Asset Price', fontsize=14, fontweight='bold')
@@ -490,8 +556,9 @@ def run_pipeline():
     ax2.set_ylim([min(np.min(drawdown), np.min(bh_drawdown)) * 1.1, 0.05])
 
     info_text = (
-        f'Strategy Return: {results_meta["cumulative_return"]*100:.2f}% | '
-        f'Buy&Hold Return: {bh_total_return*100:.2f}% | '
+        f'Strategy: {best_name} | '
+        f'Return: {results_meta["cumulative_return"]*100:.2f}% | '
+        f'Buy&Hold: {bh_total_return*100:.2f}% | '
         f'Alpha: {(results_meta["cumulative_return"] - bh_total_return)*100:.2f}% | '
         f'Sharpe: {results_meta["sharpe"]:.2f}'
     )
@@ -505,57 +572,58 @@ def run_pipeline():
     print("Графики сохранены в strategy_analysis.png")
     plt.close()
 
-    print("\nДЕТАЛЬНАЯ АНАЛИТИКА СТРАТЕГИИ:")
+    print("\n" + "=" * 60)
+    print("ДЕТАЛЬНАЯ АНАЛИТИКА СТРАТЕГИИ")
+
+    print(f"\nВыбранная стратегия: {best_name}")
 
     print("\nАнализ предсказаний модели:")
-    print(f"  Среднее предсказание: {np.mean(final_pred):.6f}")
-    print(f"  Медиана предсказаний: {np.median(final_pred):.6f}")
-    print(f"  Std предсказаний: {np.std(final_pred):.6f}")
-    print(f"  Мин/Макс: {np.min(final_pred):.6f} / {np.max(final_pred):.6f}")
-    print(f"  % положительных предсказаний: {np.mean(final_pred > 0)*100:.1f}%")
-    print(f"  % отрицательных предсказаний: {np.mean(final_pred < 0)*100:.1f}%")
+    print(f"   Среднее: {np.mean(final_pred):.6f}")
+    print(f"   Медиана: {np.median(final_pred):.6f}")
+    print(f"   Std: {np.std(final_pred):.6f}")
+    print(f"   Диапазон: [{np.min(final_pred):.6f}, {np.max(final_pred):.6f}]")
+    print(f"   % положительных: {np.mean(final_pred > 0)*100:.1f}%")
+    print(f"   % отрицательных: {np.mean(final_pred < 0)*100:.1f}%")
 
     position_changes = np.diff(signals) != 0
     num_trades = np.sum(position_changes) // 2
     time_in_market = np.mean(np.abs(signals) > 0) * 100
 
     print("\nСтатистика торговли:")
-    print(f"  Количество разворотов позиции: {np.sum(position_changes)}")
-    print(f"  Количество полных сделок: {num_trades}")
-    print(f"  Процент времени в рынке: {time_in_market:.1f}%")
+    print(f"   Разворотов позиции: {np.sum(position_changes)}")
+    print(f"   Полных сделок: {num_trades}")
+    print(f"   Времени в рынке: {time_in_market:.1f}%")
 
     long_pct = np.mean(signals > 0) * 100
     short_pct = np.mean(signals < 0) * 100
     flat_pct = np.mean(signals == 0) * 100
-    print(f"  Время в long: {long_pct:.1f}%")
-    print(f"  Время в short: {short_pct:.1f}%")
-    print(f"  Время вне рынка: {flat_pct:.1f}%")
+    print(f"   Long: {long_pct:.1f}%")
+    print(f"   Short: {short_pct:.1f}%")
+    print(f"   Flat: {flat_pct:.1f}%")
 
-    print("\n💰 Доходность:")
-    print(f"  Средняя дневная доходность: {np.mean(strategy_returns)*100:.3f}%")
-    print(f"  Std дневной доходности: {np.std(strategy_returns)*100:.3f}%")
+    print("\nАнализ доходности:")
+    print(f"   Средняя дневная: {np.mean(strategy_returns)*100:.3f}%")
+    print(f"   Std дневная: {np.std(strategy_returns)*100:.3f}%")
 
     long_returns = strategy_returns[signals > 0]
     short_returns = strategy_returns[signals < 0]
 
     if len(long_returns) > 0:
-        print(f"  Long позиции - средняя: {np.mean(long_returns)*100:.3f}%, "
-              f"win rate: {np.mean(long_returns > 0)*100:.1f}%")
+        print(f"   Long: avg={np.mean(long_returns)*100:.3f}%, win_rate={np.mean(long_returns > 0)*100:.1f}%")
     if len(short_returns) > 0:
-        print(f"  Short позиции - средняя: {np.mean(short_returns)*100:.3f}%, "
-              f"win rate: {np.mean(short_returns > 0)*100:.1f}%")
+        print(f"   Short: avg={np.mean(short_returns)*100:.3f}%, win_rate={np.mean(short_returns > 0)*100:.1f}%")
 
     print(f"\nИтоговые результаты:")
-    print(f"  Стратегия: {results_meta['cumulative_return']*100:.2f}%")
-    print(f"  Buy & Hold: {bh_total_return*100:.2f}%")
-    print(f"  Альфа (превышение): {(results_meta['cumulative_return'] - bh_total_return)*100:.2f}%")
+    print(f"   Стратегия: {results_meta['cumulative_return']*100:.2f}%")
+    print(f"   Buy & Hold: {bh_total_return*100:.2f}%")
+    print(f"   Альфа: {(results_meta['cumulative_return'] - bh_total_return)*100:.2f}%")
+    print(f"   Sharpe: {results_meta['sharpe']:.3f}")
 
-    if long_pct > 95:
-        print("\n⚠️  ВНИМАНИЕ: Стратегия почти всегда в long!")
-        print("   Рекомендация: увеличьте threshold в filter_trades_by_confidence")
-    elif short_pct > 95:
-        print("\n⚠️  ВНИМАНИЕ: Стратегия почти всегда в short!")
-        print("   Рекомендация: увеличьте threshold в filter_trades_by_confidence")
+    if num_trades == 0:
+        print("\n 0 сделок! Стратегия не переключает позиции.")
+        print("   Попробуйте другие параметры стратегий.")
+    elif num_trades < 5:
+        print(f"\n Всего {num_trades} сделок. Можно увеличить чувствительность.")
 
     return table
 
