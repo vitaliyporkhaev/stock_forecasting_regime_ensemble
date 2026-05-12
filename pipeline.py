@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from configs.config_loader import load_config
 
@@ -45,14 +46,16 @@ def run_pipeline():
     features = build_regime_features(features)
     features = clean_ml_features(features)
 
-    X = features.drop(columns=["log_return"])
-    y = features["log_return"]
+    features["target"] = features["log_return"].shift(-1)
+    features = features.dropna().reset_index(drop=True)
+
+    X = features.drop(columns=["log_return", "target"])
+    y = features["target"]
 
     split = int(len(X) * train_cfg["training"]["train_ratio"])
 
     X_train, X_test = X.iloc[:split], X.iloc[split:]
     y_train, y_test = y.iloc[:split], y.iloc[split:]
-
 
     print("Training LightGBM...")
     lgb_model = LightGBMModel()
@@ -92,27 +95,51 @@ def run_pipeline():
 
     final_pred = stacker.predict(meta_X_test)
 
-    print("Running backtest...")
-    engine = BacktestEngine()
+    print("\n" + "="*50)
+    print("DIAGNOSTICS")
+    print("="*50)
+    print(f"Predictions mean: {np.mean(final_pred):.6f}")
+    print(f"Predictions std: {np.std(final_pred):.6f}")
+    print(f"Real returns mean: {np.mean(y_test_meta):.6f}")
+    print(f"Real returns std: {np.std(y_test_meta):.6f}")
 
+    correlation = np.corrcoef(final_pred, y_test_meta)[0, 1]
+    print(f"Correlation(pred, actual): {correlation:.4f}")
+
+    direction_match = np.mean(np.sign(final_pred) == np.sign(y_test_meta))
+    print(f"Direction accuracy: {direction_match:.4f}")
+
+    print("\nRunning backtest...")
+    engine = BacktestEngine()
 
     results_meta = engine.run(final_pred, y_test_meta)
 
+    print(f"\nStrategy returns stats:")
+    print(f"Mean: {np.mean(results_meta['returns']):.6f}")
+    print(f"Std: {np.std(results_meta['returns']):.6f}")
+    print(f"Min: {np.min(results_meta['returns']):.6f}")
+    print(f"Max: {np.max(results_meta['returns']):.6f}")
+    print(f"Number of trades: {np.sum(np.diff(results_meta['positions']) != 0)}")
 
     price_start_idx = split + split_meta
-    price_end_idx = price_start_idx + len(y_test_meta)
+    price_end_idx = price_start_idx + len(y_test_meta) + 1  # +1 потому что нужны цены для расчета всех доходностей
 
     bh_prices = df["close"].iloc[price_start_idx:price_end_idx].values
 
-    bh_returns = np.diff(np.log(bh_prices))
-    bh_equity = bh_prices / bh_prices[0]
+    if len(bh_prices) > 1:
+        bh_returns = np.diff(np.log(bh_prices))
+        bh_equity = bh_prices / bh_prices[0]
 
-    bh_total_return = bh_prices[-1] / bh_prices[0] - 1
-    bh_max_dd = np.min(
-        (bh_equity - np.maximum.accumulate(bh_equity)) /
-        (np.maximum.accumulate(bh_equity) + 1e-9)
-    )
-    bh_sharpe = np.mean(bh_returns) / (np.std(bh_returns) + 1e-9) * np.sqrt(252) if len(bh_returns) > 0 else np.nan
+        bh_total_return = bh_prices[-1] / bh_prices[0] - 1
+        bh_max_dd = np.min(
+            (bh_equity - np.maximum.accumulate(bh_equity)) /
+            (np.maximum.accumulate(bh_equity) + 1e-9)
+        )
+        bh_sharpe = np.mean(bh_returns) / (np.std(bh_returns) + 1e-9) * np.sqrt(252)
+    else:
+        bh_total_return = 0
+        bh_max_dd = 0
+        bh_sharpe = np.nan
 
     results = {
         "MetaModel": results_meta,
@@ -130,14 +157,27 @@ def run_pipeline():
     print("="*50)
     print(table)
 
-    print("\nDebug info:")
-    print(f"MetaModel predictions shape: {final_pred.shape}")
-    print(f"MetaModel predictions range: [{final_pred.min():.4f}, {final_pred.max():.4f}]")
-    print(f"Test returns shape: {y_test_meta.shape}")
-    print(f"MetaModel Sharpe: {results_meta.get('sharpe', 'N/A')}")
-    print(f"MetaModel returns mean: {np.mean(results_meta['returns']):.6f}")
-    print(f"BuyHold prices: {len(bh_prices)} points")
-    print(f"BuyHold first price: {bh_prices[0]:.2f}, last price: {bh_prices[-1]:.2f}")
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+
+    axes[0].plot(final_pred[:100], label='Predictions', alpha=0.7)
+    axes[0].plot(y_test_meta[:100], label='Actual returns', alpha=0.7)
+    axes[0].set_title('Predictions vs Actual (first 100 points)')
+    axes[0].legend()
+    axes[0].grid(True)
+
+    axes[1].plot(results_meta['equity_curve'], label='Strategy Equity')
+    axes[1].plot(bh_equity[:len(results_meta['equity_curve'])], label='Buy&Hold Equity', alpha=0.7)
+    axes[1].set_title('Equity Curves')
+    axes[1].legend()
+    axes[1].grid(True)
+
+    axes[2].plot(results_meta['returns'][:100], label='Strategy Returns', alpha=0.7)
+    axes[2].set_title('Strategy Returns (first 100 points)')
+    axes[2].legend()
+    axes[2].grid(True)
+
+    plt.tight_layout()
+    plt.show()
 
     return table
 

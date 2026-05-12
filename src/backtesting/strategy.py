@@ -1,7 +1,6 @@
 import numpy as np
 
 def strategy_returns(predictions, real_returns):
-
     predictions = np.asarray(predictions)
     real_returns = np.asarray(real_returns)
 
