@@ -22,10 +22,10 @@ from src.evaluation.compare_models import build_comparison_table
 
 def run_pipeline():
 
-    data_cfg = load_config("configs/data.yaml")
-    model_cfg = load_config("configs/model.yaml")
-    train_cfg = load_config("configs/train.yaml")
-    bt_cfg = load_config("configs/backtest.yaml")
+    data_cfg = load_config("data")
+    model_cfg = load_config("model")
+    train_cfg = load_config("train")
+    bt_cfg = load_config("backtest")
 
     ticker = data_cfg["data"]["tickers"][0]
 
