@@ -10,6 +10,7 @@ from src.features.statistical_features import (
 
 from src.features.volatility_features import realized_volatility
 
+
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -17,7 +18,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["simple_return"] = simple_returns(df["close"])
 
     for lag in [1, 2, 3, 5, 10]:
-        df[f"return_lag_{lag}"] = df["log_return"].shift(lag)
+        df[f"log_return_lag_{lag}"] = df["log_return"].shift(lag)
 
     df["rsi"] = rsi(df["close"])
 
@@ -35,11 +36,13 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["bb_lower"] = lower
     df["bb_width"] = upper - lower
 
-    df["volatility_20"] = realized_volatility(df["log_return"])
+    df["volatility"] = realized_volatility(df["log_return"])
+    df["volatility_20"] = df["volatility"]  # alias for regimes compatibility
 
     roll = rolling_features(df["log_return"])
     df = pd.concat([df, roll], axis=1)
 
-    df = df.dropna()
+    df = df.replace([float("inf"), -float("inf")], pd.NA)
+    df = df.dropna().reset_index(drop=True)
 
     return df
