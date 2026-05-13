@@ -307,15 +307,14 @@ def momentum_strategy(predictions, window=5):
     return signals
 
 def calculate_dynamic_position_size(confidence, volatility, max_position=1.0, risk_target=0.02):
-
     norm_confidence = np.abs(confidence) / (np.percentile(np.abs(confidence), 90) + 1e-9)
-    norm_confidence = np.clip(norm_confidence, 0.1, 1.0)
+    norm_confidence = np.clip(norm_confidence, 0.2, 1.0)
 
     vol_scalar = risk_target / (volatility * 100 + 1e-9)
-    vol_scalar = np.clip(vol_scalar, 0.1, 1.0)
+    vol_scalar = np.clip(vol_scalar, 0.2, 1.5)
 
     position_size = norm_confidence * vol_scalar
-    position_size = np.clip(position_size, 0, max_position)
+    position_size = np.clip(position_size, 0.10, max_position)
 
     return position_size
 
@@ -434,28 +433,26 @@ def apply_risk_filters(predictions, returns, volatility,
 
     for i in range(1, len(signals)):
         if current_drawdown[i] < -max_drawdown_limit:
-            modified_signals[i] = 0
+            modified_signals[i] *= 0.3
 
         if i < len(var_95) and abs(var_95[i]) > var_limit:
-            modified_signals[i] = 0
+            modified_signals[i] *= 0.5
 
         if volatility[i] > np.percentile(volatility[:i+1], 90):
-            modified_signals[i] = 0
+            modified_signals[i] *= 0.5
 
     return modified_signals
 
 
 def apply_kelly_criterion(win_rate, avg_win, avg_loss):
-
     if avg_loss == 0:
-        return 0
+        return 0.10
 
-    b = abs(avg_win / avg_loss) if avg_loss != 0 else 1
-    p = win_rate
+    b = abs(avg_win / (avg_loss + 1e-9))
+    p = np.clip(win_rate, 0.1, 0.9)
+    kelly_fraction = (p * b - (1 - p)) / (b + 1e-9)
 
-    kelly_fraction = (p * b - (1 - p)) / b
-
-    return np.clip(kelly_fraction * 0.5, 0, 0.25)
+    return np.clip(kelly_fraction * 0.5, 0.05, 0.25)
 
 
 def apply_risk_management(final_pred, y_test_meta, base_signals,
@@ -681,11 +678,9 @@ def run_pipeline_for_ticker_with_risk_management(ticker, data_cfg, train_cfg):
         final_pred, volatility, max_position=kelly_size * 2, risk_target=0.02
     )
 
-    signals_sl = apply_stop_loss(best_signals, base_ret, stop_loss_pct=0.02)
-
-    signals_tp = apply_take_profit(signals_sl, base_ret, take_profit_pct=0.05)
-
-    signals_ts = apply_trailing_stop(signals_tp, base_ret, trailing_pct=0.03)
+    signals_sl = apply_stop_loss(best_signals, base_ret, stop_loss_pct=0.03)
+    signals_tp = apply_take_profit(signals_sl, base_ret, take_profit_pct=0.08)
+    signals_ts = apply_trailing_stop(signals_tp, base_ret, trailing_pct=0.05)
 
     signals_filtered = apply_risk_filters(
         final_pred, base_ret, volatility,
@@ -699,10 +694,13 @@ def run_pipeline_for_ticker_with_risk_management(ticker, data_cfg, train_cfg):
     managed_signals = managed_signals * position_sizes
 
     managed_signals = np.clip(managed_signals, -1.0, 1.0)
+    if np.sum(np.abs(managed_signals) > 0.01) < len(managed_signals) * 0.3:
+        managed_signals = best_signals * 0.15
+        print("Возврат к базовой стратегии с мин. размером 15%")
 
     managed_returns = managed_signals * y_test_meta
 
-    transaction_cost = 0.001
+    transaction_cost = 0.0005
     trades_mask = np.diff(managed_signals, prepend=0) != 0
     managed_returns[trades_mask] -= transaction_cost * np.abs(managed_signals[trades_mask])
 
