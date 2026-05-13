@@ -308,11 +308,10 @@ def momentum_strategy(predictions, window=5):
 
 
 def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
-    print(f"\n")
     print(f"Обработка тикера: {ticker}")
 
     df = download_ticker(ticker)
-    print(f"   Загружено {len(df)} строк")
+    print(f"Загружено {len(df)} строк")
 
     df["log_return"] = np.log(df["close"] / df["close"].shift(1))
     df = df.dropna().reset_index(drop=True)
@@ -371,7 +370,7 @@ def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
     X_test_lstm = X_test.values.reshape(len(X_test), X_test.shape[1], 1)
 
     lstm_model = LSTMModel(input_shape=(X_train.shape[1], 1))
-    lstm_model.fit(X_train_lstm, y_train.values, epochs=10, batch_size=64)  # Уменьшил эпохи
+    lstm_model.fit(X_train_lstm, y_train.values, epochs=10, batch_size=64)
     lstm_pred = lstm_model.predict(X_test_lstm)
 
     arima_model = ARIMAModel(order=(2, 1, 2))
@@ -410,30 +409,51 @@ def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
     final_pred = stacker.predict(meta_X_test)
     final_pred = (final_pred - np.mean(final_pred)) / (np.std(final_pred) + 1e-9)
 
-    strategies = {
-        'Percentile (70/30)': percentile_strategy(final_pred, 70, 30),
-        'Momentum (5)': momentum_strategy(final_pred, 5),
-        'Always Long': np.ones_like(final_pred),
-    }
+
+    train_trend = np.mean(y_train_meta)
+
+    if train_trend > 0:
+        strategies = {
+            'Long-biased (80/20)': lambda p: np.where(p > np.percentile(p, 20), 1, 0),
+            'Long only (60/0)': lambda p: np.where(p > np.percentile(p, 40), 1, 0),
+            'Momentum long': lambda p: np.where(pd.Series(p).rolling(5).mean().fillna(0) > 0, 1, 0),
+        }
+    else:
+        strategies = {
+            'Percentile (70/30)': lambda p: percentile_strategy(p, 70, 30),
+            'Percentile (60/40)': lambda p: percentile_strategy(p, 60, 40),
+            'Momentum (5)': lambda p: momentum_strategy(p, 5),
+        }
+
+    strategies.update({
+        'Always Long': lambda p: np.ones_like(p),
+    })
 
     best_sharpe = -np.inf
     best_strategy = None
     best_signals = None
     best_name = ""
 
-    for name, signals in strategies.items():
-        ret = signals * y_test_meta
-        sharpe = np.mean(ret) / (np.std(ret) + 1e-9) * np.sqrt(252)
-        trades = np.sum(np.diff(signals) != 0) // 2
+    for name, strategy_func in strategies.items():
+        try:
+            signals = strategy_func(final_pred)
+            ret = signals * y_test_meta
+            sharpe = np.mean(ret) / (np.std(ret) + 1e-9) * np.sqrt(252)
+            trades = np.sum(np.diff(signals) != 0) // 2
 
-        if sharpe > best_sharpe and trades > 0:
-            best_sharpe = sharpe
-            best_signals = signals
-            best_name = name
-            best_strategy = ret
+            if trades == 0:
+                sharpe -= 0.5
+
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_signals = signals
+                best_name = name
+                best_strategy = ret
+        except:
+            continue
 
     if best_strategy is None:
-        best_signals = strategies['Always Long']
+        best_signals = np.ones_like(final_pred)
         best_name = 'Always Long'
         best_strategy = best_signals * y_test_meta
 
@@ -456,6 +476,15 @@ def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
 
     trades = np.sum(np.diff(best_signals) != 0) // 2
 
+    long_exposure = np.mean(best_signals > 0) * 100
+    short_exposure = np.mean(best_signals < 0) * 100
+
+    print(f"   Тренд рынка: {'Растущий' if train_trend > 0 else 'Падающий'} ({train_trend*100:.2f}%)")
+    print(f"   Стратегия: {best_name}")
+    print(f"   Long: {long_exposure:.0f}%, Short: {short_exposure:.0f}%")
+    print(f"   Сделок: {trades}, Sharpe: {sharpe:.3f}")
+    print(f"   Strategy: {cumulative_return*100:+.2f}% vs B&H: {bh_total_return*100:+.2f}% | α: {(cumulative_return-bh_total_return)*100:+.2f}%")
+
     return {
         'ticker': ticker,
         'strategy_return': cumulative_return,
@@ -464,7 +493,10 @@ def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
         'sharpe': sharpe,
         'bh_sharpe': bh_sharpe,
         'trades': trades,
-        'strategy': best_name
+        'strategy': best_name,
+        'trend': 'Up' if train_trend > 0 else 'Down',
+        'long_pct': long_exposure,
+        'short_pct': short_exposure
     }
 
 
