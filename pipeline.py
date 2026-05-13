@@ -311,7 +311,7 @@ def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
     print(f"Обработка тикера: {ticker}")
 
     df = download_ticker(ticker)
-    print(f"Загружено {len(df)} строк")
+    print(f"   Загружено {len(df)} строк")
 
     df["log_return"] = np.log(df["close"] / df["close"].shift(1))
     df = df.dropna().reset_index(drop=True)
@@ -409,25 +409,48 @@ def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
     final_pred = stacker.predict(meta_X_test)
     final_pred = (final_pred - np.mean(final_pred)) / (np.std(final_pred) + 1e-9)
 
-
     train_trend = np.mean(y_train_meta)
 
-    if train_trend > 0:
-        strategies = {
-            'Long-biased (80/20)': lambda p: np.where(p > np.percentile(p, 20), 1, 0),
-            'Long only (60/0)': lambda p: np.where(p > np.percentile(p, 40), 1, 0),
-            'Momentum long': lambda p: np.where(pd.Series(p).rolling(5).mean().fillna(0) > 0, 1, 0),
-        }
-    else:
-        strategies = {
-            'Percentile (70/30)': lambda p: percentile_strategy(p, 70, 30),
-            'Percentile (60/40)': lambda p: percentile_strategy(p, 60, 40),
-            'Momentum (5)': lambda p: momentum_strategy(p, 5),
-        }
+    test_trend = np.mean(y_test_meta)
 
-    strategies.update({
+    price_start_idx = split + split_meta
+    price_end_idx = price_start_idx + len(y_test_meta) + 1
+    bh_prices = df["close"].iloc[price_start_idx:price_end_idx].values
+
+    if len(bh_prices) > 1:
+        bh_returns = np.diff(np.log(bh_prices))
+        bh_total_return = bh_prices[-1] / bh_prices[0] - 1
+        bh_sharpe = np.mean(bh_returns) / (np.std(bh_returns) + 1e-9) * np.sqrt(252)
+        bh_equity = bh_prices / bh_prices[0]
+    else:
+        bh_total_return = bh_sharpe = 0
+
+    market_up = bh_total_return > 0
+
+    print(f"Анализ рынка:")
+    print(f"      Train тренд: {train_trend*100:+.2f}%/день")
+    print(f"      Test тренд:  {test_trend*100:+.2f}%/день")
+    print(f"      B&H на тесте: {bh_total_return*100:+.2f}% → {'📈 UP' if market_up else '📉 DOWN'}")
+
+    strategies = {
+        'Percentile (70/30)': lambda p: percentile_strategy(p, 70, 30),
+        'Percentile (60/40)': lambda p: percentile_strategy(p, 60, 40),
+        'Momentum (5)': lambda p: momentum_strategy(p, 5),
+        'Momentum (10)': lambda p: momentum_strategy(p, 10),
+        'Long-biased (80/20)': lambda p: np.where(p > np.percentile(p, 20), 1, 0),
+        'Long only (70/0)': lambda p: np.where(p > np.percentile(p, 30), 1, 0),
         'Always Long': lambda p: np.ones_like(p),
-    })
+    }
+
+    if not market_up:
+        strategies.update({
+            'Short only': lambda p: np.where(p < np.median(p), -1, 0),
+            'Short-biased': lambda p: np.where(p < np.percentile(p, 70), -1, 1),
+        })
+
+    print(f"\nТестирование {len(strategies)} стратегий:")
+    print(f"   {'Стратегия':<25s} {'Sharpe':>8s} {'Return':>10s} {'Trades':>8s}")
+    print(f"   {'-'*55}")
 
     best_sharpe = -np.inf
     best_strategy = None
@@ -439,22 +462,25 @@ def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
             signals = strategy_func(final_pred)
             ret = signals * y_test_meta
             sharpe = np.mean(ret) / (np.std(ret) + 1e-9) * np.sqrt(252)
+            total_ret = np.prod(1 + ret + 1e-9) - 1
             trades = np.sum(np.diff(signals) != 0) // 2
 
-            if trades == 0:
-                sharpe -= 0.5
+            print(f"   {name:<25s} {sharpe:>8.3f} {total_ret*100:>9.2f}% {trades:>8d}")
 
-            if sharpe > best_sharpe:
-                best_sharpe = sharpe
+            adjusted_sharpe = sharpe - (0.5 if trades == 0 else 0)
+
+            if adjusted_sharpe > best_sharpe:
+                best_sharpe = adjusted_sharpe
                 best_signals = signals
                 best_name = name
                 best_strategy = ret
-        except:
+        except Exception as e:
+            print(f"   {name:<25s} ERROR: {str(e)[:30]}")
             continue
 
     if best_strategy is None:
         best_signals = np.ones_like(final_pred)
-        best_name = 'Always Long'
+        best_name = 'Always Long (fallback)'
         best_strategy = best_signals * y_test_meta
 
     strategy_returns = best_strategy
@@ -463,27 +489,23 @@ def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
     cumulative_return = equity_curve[-1] - 1 if len(equity_curve) > 0 else 0
     sharpe = np.mean(strategy_returns) / (np.std(strategy_returns) + 1e-9) * np.sqrt(252)
 
-    price_start_idx = split + split_meta
-    price_end_idx = price_start_idx + len(y_test_meta) + 1
-    bh_prices = df["close"].iloc[price_start_idx:price_end_idx].values
-
-    if len(bh_prices) > 1:
-        bh_returns = np.diff(np.log(bh_prices))
-        bh_total_return = bh_prices[-1] / bh_prices[0] - 1
-        bh_sharpe = np.mean(bh_returns) / (np.std(bh_returns) + 1e-9) * np.sqrt(252)
-    else:
-        bh_total_return = bh_sharpe = 0
-
     trades = np.sum(np.diff(best_signals) != 0) // 2
 
     long_exposure = np.mean(best_signals > 0) * 100
     short_exposure = np.mean(best_signals < 0) * 100
+    flat_exposure = np.mean(best_signals == 0) * 100
 
-    print(f"   Тренд рынка: {'Растущий' if train_trend > 0 else 'Падающий'} ({train_trend*100:.2f}%)")
-    print(f"   Стратегия: {best_name}")
-    print(f"   Long: {long_exposure:.0f}%, Short: {short_exposure:.0f}%")
-    print(f"   Сделок: {trades}, Sharpe: {sharpe:.3f}")
-    print(f"   Strategy: {cumulative_return*100:+.2f}% vs B&H: {bh_total_return*100:+.2f}% | α: {(cumulative_return-bh_total_return)*100:+.2f}%")
+    long_returns = strategy_returns[best_signals > 0]
+    short_returns = strategy_returns[best_signals < 0]
+
+    long_avg = np.mean(long_returns) * 100 if len(long_returns) > 0 else 0
+    short_avg = np.mean(short_returns) * 100 if len(short_returns) > 0 else 0
+
+    print(f"\nВыбрана: {best_name}")
+    print(f"Позиции: Long={long_exposure:.0f}%, Short={short_exposure:.0f}%, Flat={flat_exposure:.0f}%")
+    print(f"Long avg: {long_avg:+.3f}%/день, Short avg: {short_avg:+.3f}%/день")
+    print(f"Strategy: {cumulative_return*100:+.2f}% vs B&H: {bh_total_return*100:+.2f}%")
+    print(f"Alpha: {(cumulative_return-bh_total_return)*100:+.2f}%, Sharpe: {sharpe:.3f}")
 
     return {
         'ticker': ticker,
@@ -494,9 +516,12 @@ def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
         'bh_sharpe': bh_sharpe,
         'trades': trades,
         'strategy': best_name,
-        'trend': 'Up' if train_trend > 0 else 'Down',
+        'market': 'UP' if market_up else 'DOWN',
         'long_pct': long_exposure,
-        'short_pct': short_exposure
+        'short_pct': short_exposure,
+        'flat_pct': flat_exposure,
+        'train_trend': train_trend,
+        'test_trend': test_trend
     }
 
 
