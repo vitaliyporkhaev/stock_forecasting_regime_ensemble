@@ -307,14 +307,12 @@ def momentum_strategy(predictions, window=5):
     return signals
 
 
-def run_pipeline():
-
-    data_cfg = load_config("data")
-    train_cfg = load_config("train")
-
-    ticker = data_cfg["data"]["tickers"][0]
+def run_pipeline_for_ticker(ticker, data_cfg, train_cfg):
+    print(f"\n")
+    print(f"Обработка тикера: {ticker}")
 
     df = download_ticker(ticker)
+    print(f"   Загружено {len(df)} строк")
 
     df["log_return"] = np.log(df["close"] / df["close"].shift(1))
     df = df.dropna().reset_index(drop=True)
@@ -353,7 +351,7 @@ def run_pipeline():
 
     lgb_model = LightGBMModel()
     lgb_model.model = lgb.LGBMRegressor(
-        n_estimators=500,
+        n_estimators=300,
         learning_rate=0.03,
         num_leaves=63,
         max_depth=7,
@@ -363,24 +361,22 @@ def run_pipeline():
         reg_alpha=0.1,
         reg_lambda=0.1,
         random_state=42,
-        verbose=-1
+        verbose=-1,
+        n_jobs=-1
     )
     lgb_model.fit(X_train, y_train)
     lgb_pred = lgb_model.predict(X_test)
-    print(f"   LightGBM pred: mean={np.mean(lgb_pred):.6f}, std={np.std(lgb_pred):.6f}")
 
     X_train_lstm = X_train.values.reshape(len(X_train), X_train.shape[1], 1)
     X_test_lstm = X_test.values.reshape(len(X_test), X_test.shape[1], 1)
 
     lstm_model = LSTMModel(input_shape=(X_train.shape[1], 1))
-    lstm_model.fit(X_train_lstm, y_train.values, epochs=20, batch_size=64)
+    lstm_model.fit(X_train_lstm, y_train.values, epochs=10, batch_size=64)  # Уменьшил эпохи
     lstm_pred = lstm_model.predict(X_test_lstm)
-    print(f"   LSTM pred: mean={np.mean(lstm_pred):.6f}, std={np.std(lstm_pred):.6f}")
 
     arima_model = ARIMAModel(order=(2, 1, 2))
     arima_model.fit(y_train)
     arima_pred = np.array(arima_model.predict(len(y_test))).reshape(-1)
-    print(f"   ARIMA pred: mean={np.mean(arima_pred):.6f}, std={np.std(arima_pred):.6f}")
 
     min_len = min(len(lgb_pred), len(lstm_pred), len(arima_pred), len(y_test))
 
@@ -412,38 +408,23 @@ def run_pipeline():
     stacker.fit(meta_X_train, y_train_meta)
 
     final_pred = stacker.predict(meta_X_test)
-
     final_pred = (final_pred - np.mean(final_pred)) / (np.std(final_pred) + 1e-9)
 
-    print(f"   Stack pred: mean={np.mean(final_pred):.6f}, std={np.std(final_pred):.6f}")
-    print(f"   Positive: {np.mean(final_pred > 0)*100:.1f}%")
-    print(f"   Negative: {np.mean(final_pred < 0)*100:.1f}%")
-
     strategies = {
-        'Percentile (60/40)': percentile_strategy(final_pred, 60, 40),
         'Percentile (70/30)': percentile_strategy(final_pred, 70, 30),
-        'Percentile (80/20)': percentile_strategy(final_pred, 80, 20),
         'Momentum (5)': momentum_strategy(final_pred, 5),
-        'Momentum (10)': momentum_strategy(final_pred, 10),
         'Always Long': np.ones_like(final_pred),
     }
 
-    print(f"  {'Стратегия':<25s} {'Sharpe':>8s} {'Return':>10s} {'Trades':>8s} {'Win Rate':>10s}")
-
+    best_sharpe = -np.inf
     best_strategy = None
     best_signals = None
-    best_sharpe = -np.inf
     best_name = ""
 
     for name, signals in strategies.items():
         ret = signals * y_test_meta
-
         sharpe = np.mean(ret) / (np.std(ret) + 1e-9) * np.sqrt(252)
-        total_ret = np.prod(1 + ret + 1e-9) - 1
         trades = np.sum(np.diff(signals) != 0) // 2
-        win_rate = np.mean(ret > 0) * 100
-
-        print(f"  {name:<25s} {sharpe:>8.3f} {total_ret*100:>9.2f}% {trades:>8d} {win_rate:>9.1f}%")
 
         if sharpe > best_sharpe and trades > 0:
             best_sharpe = sharpe
@@ -452,180 +433,134 @@ def run_pipeline():
             best_strategy = ret
 
     if best_strategy is None:
-        best_sharpe = -np.inf
-        for name, signals in strategies.items():
-            ret = signals * y_test_meta
-            sharpe = np.mean(ret) / (np.std(ret) + 1e-9) * np.sqrt(252)
-            if sharpe > best_sharpe:
-                best_sharpe = sharpe
-                best_signals = signals
-                best_name = name
-                best_strategy = ret
+        best_signals = strategies['Always Long']
+        best_name = 'Always Long'
+        best_strategy = best_signals * y_test_meta
 
-    print(f"\nВыбрана стратегия: {best_name}")
-
-    signals = best_signals
     strategy_returns = best_strategy
 
-    engine = BacktestEngine()
-    results_meta = engine.run(final_pred, y_test_meta)
-
     equity_curve = np.cumprod(1 + strategy_returns + 1e-9)
-    results_meta["cumulative_return"] = equity_curve[-1] - 1 if len(equity_curve) > 0 else 0
-    results_meta["sharpe"] = np.mean(strategy_returns) / (np.std(strategy_returns) + 1e-9) * np.sqrt(252)
-
-    model_rmse = rmse(y_test_meta, final_pred)
-    model_mae = mae(y_test_meta, final_pred)
-    model_dir_acc = direction_accuracy(y_test_meta, final_pred)
-
-    results_meta["rmse"] = model_rmse
-    results_meta["mae"] = model_mae
-    results_meta["direction_acc"] = model_dir_acc
+    cumulative_return = equity_curve[-1] - 1 if len(equity_curve) > 0 else 0
+    sharpe = np.mean(strategy_returns) / (np.std(strategy_returns) + 1e-9) * np.sqrt(252)
 
     price_start_idx = split + split_meta
     price_end_idx = price_start_idx + len(y_test_meta) + 1
-
     bh_prices = df["close"].iloc[price_start_idx:price_end_idx].values
 
     if len(bh_prices) > 1:
         bh_returns = np.diff(np.log(bh_prices))
-        bh_equity = bh_prices / bh_prices[0]
         bh_total_return = bh_prices[-1] / bh_prices[0] - 1
-        bh_max_dd = np.min(
-            (bh_equity - np.maximum.accumulate(bh_equity)) /
-            (np.maximum.accumulate(bh_equity) + 1e-9)
-        )
         bh_sharpe = np.mean(bh_returns) / (np.std(bh_returns) + 1e-9) * np.sqrt(252)
     else:
-        bh_total_return = bh_max_dd = bh_sharpe = 0
+        bh_total_return = bh_sharpe = 0
 
-    results = {
-        "MetaModel": {**results_meta, "return": results_meta["cumulative_return"]},
-        "BuyHold": {
-            "sharpe": bh_sharpe,
-            "max_drawdown": bh_max_dd,
-            "cumulative_return": bh_total_return,
-            "return": bh_total_return,
-            "rmse": None,
-            "mae": None,
-            "direction_acc": None
-        }
+    trades = np.sum(np.diff(best_signals) != 0) // 2
+
+    return {
+        'ticker': ticker,
+        'strategy_return': cumulative_return,
+        'bh_return': bh_total_return,
+        'alpha': cumulative_return - bh_total_return,
+        'sharpe': sharpe,
+        'bh_sharpe': bh_sharpe,
+        'trades': trades,
+        'strategy': best_name
     }
 
-    table = build_comparison_table(results)
 
-    print("\n" + "=" * 60)
-    print("ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ")
-    print(table.to_string())
+def run_pipeline():
+    print("ЗАПУСК ТОРГОВОГО ПАЙПЛАЙНА (МУЛЬТИ-ТИКЕР)")
 
-    fig, axes = plt.subplots(2, 1, figsize=(15, 10))
+    data_cfg = load_config("data")
+    train_cfg = load_config("train")
 
-    ax1 = axes[0]
-    ax1.plot(equity_curve, label='Strategy Equity', linewidth=2, color='green')
-    ax1.plot(bh_equity, label='Buy & Hold Equity', alpha=0.8, linewidth=2, color='blue')
-    ax1.set_title('Equity Curves and Asset Price', fontsize=14, fontweight='bold')
-    ax1.set_xlabel('Time')
-    ax1.set_ylabel('Normalized Equity')
-    ax1.grid(True, alpha=0.3)
-    ax1.axhline(y=1.0, color='black', linestyle='-', alpha=0.2, linewidth=0.5)
+    tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
 
-    ax1_twin = ax1.twinx()
-    ax1_twin.plot(bh_prices, label=f'{ticker} Price ($)', alpha=0.6, linewidth=1.5,
-                  color='gray', linestyle='--')
-    ax1_twin.set_ylabel(f'{ticker} Price ($)', color='gray')
-    ax1_twin.tick_params(axis='y', labelcolor='gray')
+    print(f"\nТестируемые тикеры: {', '.join(tickers)}")
 
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax1_twin.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+    all_results = []
 
-    ax2 = axes[1]
-    running_max = np.maximum.accumulate(equity_curve)
-    drawdown = (equity_curve - running_max) / (running_max + 1e-9)
+    for ticker in tickers:
+        try:
+            result = run_pipeline_for_ticker(ticker, data_cfg, train_cfg)
+            all_results.append(result)
+        except Exception as e:
+            print(f"Ошибка для {ticker}: {str(e)[:100]}")
+            continue
 
-    bh_running_max = np.maximum.accumulate(bh_equity)
-    bh_drawdown = (bh_equity - bh_running_max) / (bh_running_max + 1e-9)
+    if all_results:
+        results_df = pd.DataFrame(all_results)
 
-    ax2.fill_between(range(len(drawdown)), drawdown, 0, alpha=0.3, color='red', label='Strategy DD')
-    ax2.plot(bh_drawdown, alpha=0.5, color='orange', linewidth=1.5, label='Buy&Hold DD')
-    ax2.set_title('Drawdown Comparison', fontsize=14, fontweight='bold')
-    ax2.legend(loc='lower left')
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xlabel('Time')
-    ax2.set_ylabel('Drawdown')
-    ax2.set_ylim([min(np.min(drawdown), np.min(bh_drawdown)) * 1.1, 0.05])
+        print("\n")
+        print("СВОДНЫЕ РЕЗУЛЬТАТЫ ПО ВСЕМ ТИКЕРАМ")
 
-    info_text = (
-        f'Strategy: {best_name} | '
-        f'Return: {results_meta["cumulative_return"]*100:.2f}% | '
-        f'Buy&Hold: {bh_total_return*100:.2f}% | '
-        f'Alpha: {(results_meta["cumulative_return"] - bh_total_return)*100:.2f}% | '
-        f'Sharpe: {results_meta["sharpe"]:.2f}'
-    )
+        display_df = results_df.copy()
+        display_df['strategy_return'] = display_df['strategy_return'] * 100
+        display_df['bh_return'] = display_df['bh_return'] * 100
+        display_df['alpha'] = display_df['alpha'] * 100
 
-    plt.figtext(0.02, 0.02, info_text,
-                fontsize=10, fontweight='bold',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        print(display_df.to_string(
+            index=False,
+            formatters={
+                'strategy_return': '{:+.2f}%'.format,
+                'bh_return': '{:+.2f}%'.format,
+                'alpha': '{:+.2f}%'.format,
+                'sharpe': '{:.3f}'.format,
+                'bh_sharpe': '{:.3f}'.format,
+            }
+        ))
 
-    plt.tight_layout()
-    plt.savefig('strategy_analysis.png', dpi=150, bbox_inches='tight')
-    print("Графики сохранены в strategy_analysis.png")
-    plt.close()
+        print("\n")
+        print("АГРЕГИРОВАННАЯ СТАТИСТИКА")
 
-    print("\n" + "=" * 60)
-    print("ДЕТАЛЬНАЯ АНАЛИТИКА СТРАТЕГИИ")
+        winning_tickers = np.sum(results_df['alpha'] > 0)
+        total_tickers = len(results_df)
 
-    print(f"\nВыбранная стратегия: {best_name}")
+        print(f"Стратегия обыграла Buy&Hold: {winning_tickers}/{total_tickers} тикеров ({winning_tickers/total_tickers*100:.1f}%)")
+        print(f"Средняя альфа: {np.mean(results_df['alpha'])*100:.2f}%")
+        print(f"Медианная альфа: {np.median(results_df['alpha'])*100:.2f}%")
+        print(f"Средний Sharpe: {np.mean(results_df['sharpe']):.3f}")
+        print(f"Средний Buy&Hold Sharpe: {np.mean(results_df['bh_sharpe']):.3f}")
+        print(f"Среднее количество сделок: {np.mean(results_df['trades']):.0f}")
+        print(f"\nЛучший тикер: {results_df.loc[results_df['alpha'].idxmax(), 'ticker']} "
+              f"(α={results_df['alpha'].max()*100:.2f}%)")
+        print(f"Худший тикер: {results_df.loc[results_df['alpha'].idxmin(), 'ticker']} "
+              f"(α={results_df['alpha'].min()*100:.2f}%)")
 
-    print("\nАнализ предсказаний модели:")
-    print(f"   Среднее: {np.mean(final_pred):.6f}")
-    print(f"   Медиана: {np.median(final_pred):.6f}")
-    print(f"   Std: {np.std(final_pred):.6f}")
-    print(f"   Диапазон: [{np.min(final_pred):.6f}, {np.max(final_pred):.6f}]")
-    print(f"   % положительных: {np.mean(final_pred > 0)*100:.1f}%")
-    print(f"   % отрицательных: {np.mean(final_pred < 0)*100:.1f}%")
+        results_df.to_csv('multi_ticker_results.csv', index=False)
+        print("\nРезультаты сохранены в multi_ticker_results.csv")
 
-    position_changes = np.diff(signals) != 0
-    num_trades = np.sum(position_changes) // 2
-    time_in_market = np.mean(np.abs(signals) > 0) * 100
+        fig, ax = plt.subplots(figsize=(12, 6))
 
-    print("\nСтатистика торговли:")
-    print(f"   Разворотов позиции: {np.sum(position_changes)}")
-    print(f"   Полных сделок: {num_trades}")
-    print(f"   Времени в рынке: {time_in_market:.1f}%")
+        x = np.arange(len(results_df))
+        width = 0.35
 
-    long_pct = np.mean(signals > 0) * 100
-    short_pct = np.mean(signals < 0) * 100
-    flat_pct = np.mean(signals == 0) * 100
-    print(f"   Long: {long_pct:.1f}%")
-    print(f"   Short: {short_pct:.1f}%")
-    print(f"   Flat: {flat_pct:.1f}%")
+        bars1 = ax.bar(x - width/2, results_df['strategy_return']*100, width,
+                       label='Strategy', color='green', alpha=0.7)
+        bars2 = ax.bar(x + width/2, results_df['bh_return']*100, width,
+                       label='Buy&Hold', color='blue', alpha=0.7)
 
-    print("\nАнализ доходности:")
-    print(f"   Средняя дневная: {np.mean(strategy_returns)*100:.3f}%")
-    print(f"   Std дневная: {np.std(strategy_returns)*100:.3f}%")
+        ax.set_xlabel('Ticker')
+        ax.set_ylabel('Return (%)')
+        ax.set_title('Strategy vs Buy&Hold Returns by Ticker')
+        ax.set_xticks(x)
+        ax.set_xticklabels(results_df['ticker'], rotation=45)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
 
-    long_returns = strategy_returns[signals > 0]
-    short_returns = strategy_returns[signals < 0]
+        for bar in bars1:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height:+.1f}%', ha='center', va='bottom' if height > 0 else 'top',
+                   fontsize=8)
 
-    if len(long_returns) > 0:
-        print(f"   Long: avg={np.mean(long_returns)*100:.3f}%, win_rate={np.mean(long_returns > 0)*100:.1f}%")
-    if len(short_returns) > 0:
-        print(f"   Short: avg={np.mean(short_returns)*100:.3f}%, win_rate={np.mean(short_returns > 0)*100:.1f}%")
+        plt.tight_layout()
+        plt.savefig('multi_ticker_comparison.png', dpi=150, bbox_inches='tight')
+        print("График сравнения сохранен в multi_ticker_comparison.png")
+        plt.close()
 
-    print(f"\nИтоговые результаты:")
-    print(f"   Стратегия: {results_meta['cumulative_return']*100:.2f}%")
-    print(f"   Buy & Hold: {bh_total_return*100:.2f}%")
-    print(f"   Альфа: {(results_meta['cumulative_return'] - bh_total_return)*100:.2f}%")
-    print(f"   Sharpe: {results_meta['sharpe']:.3f}")
-
-    if num_trades == 0:
-        print("\n 0 сделок! Стратегия не переключает позиции.")
-        print("   Попробуйте другие параметры стратегий.")
-    elif num_trades < 5:
-        print(f"\n Всего {num_trades} сделок. Можно увеличить чувствительность.")
-
-    return table
+    return results_df if all_results else None
 
 
 if __name__ == "__main__":
